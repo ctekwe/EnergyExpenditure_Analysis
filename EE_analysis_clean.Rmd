@@ -1,0 +1,770 @@
+---
+title: "EE analysis Simulation Results"
+author: "Yuanyuan Luan"
+date: "`r Sys.Date()`"
+link-citations: yes
+header-includes:
+- \usepackage{float}
+- \usepackage{mathtools}
+output: 
+ bookdown::pdf_document2
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, echo = F, message = FALSE}
+library(stats)
+library(ggplot2)
+library(lattice)
+library(dplyr)
+library(magrittr)
+library(Matrix)
+library(MASS)
+library(reshape)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(mi) ## for imputation
+library(lmerTest)
+library(cplm) ## truncated power splines
+library("formatR") ## better format r markdown
+opts_chunk$set(fig.cap="",
+               #fig.width=8, fig.height=6, 
+               #fig.path = "./old_sim_res_pics/",
+               fig.pos = "!H",
+               out.extra = "",
+               dpi=150,
+               warning = FALSE)
+set.seed(1)
+#options(digits=4)
+
+### wrap long codes 
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 50), tidy = TRUE)
+```
+
+
+# Data analysis
+
+1. Semiparametric methods: B-spline basis (linear, quadratic, cubic) and Truncated power basis (linear, quadratic, cubic)
+2. parametric methods: linear mixed effect model (linear, quadratic, cubic) with raw data (Heat) and linear mixed effect model (linear, quadratic, cubic) with log-transformed Heat (log(Heat))
+3. Impute minute level data for subject 11 and 12 and do analysis
+4. Do bootstrap for the semiparametric methods
+
+## data cleaning and preparation 
+
+1. we did imputation for missing Heat data in observation 11 and 12 at minute level
+2. we created hour variable based on min (I used a really smart way (I think) and I am kind of pround of it)
+3. we take average heat by hour to create hour-level data 
+4. for the purpose of simple application, we need to change the time variable in the data into "time" if it was not.
+
+
+```{r echo=F, message=F, warning=F, include=F,eval=F}
+
+dat = read.table("./rats_heat.txt", header=T)
+dim(dat)
+head(dat)
+table(dat$time)
+
+
+### observation 11 and 12 do not have Heat data at 24 hours
+### We use imputation to "create" some for them at the minute level
+### The corresponding minute was copied observation 10 since each observations have sort of different time points
+dim(dat[dat$animal==10,]) ## 200 obs
+dim(dat[dat$animal==11,]) ## 190
+dim(dat[dat$animal==12,]) ## 190
+
+## add 10 rows to subject 11 with Heat = NA and time = time of obs 10
+obs11 = dat %>% 
+  filter(animal ==11) %>% 
+  add_row(animal= rep(11, 10), Heat = rep(NA, 10), 
+          trtgrp = rep(1, 10), time = dat[dat$animal==10,]$time[191:200])  
+
+## add 10 rows to subject 12 with Heat = NA and time = time of obs 10
+obs12 = dat %>% 
+  filter(animal ==12) %>% 
+  add_row(animal= rep(12, 10), Heat = rep(NA, 10), 
+          trtgrp = rep(1, 10), time = dat[dat$animal==10,]$time[191:200])  
+
+### replace the new data for obs 11 and 12 in the data 
+dat = dat %>% 
+  filter(animal !=11 & animal !=12) %>% 
+  add_row(obs11) %>% 
+  add_row(obs12)
+
+### Convert to a missing_data.frame
+mdf = missing_data.frame(dat)
+
+#image(mdf)
+# hist(mdf)
+# show(mdf)
+
+# conduct the multiple imputation 
+# note there are options to use here if you can access multiple cores since this may take a while
+imputations = mi(mdf, n.iter = 30, n.chains = 4, max.minutes = 20, seed = 123)
+
+## image(imputations)
+## plot(imputations)
+
+# we can access each imputed data set manually using 'complete'
+test1 = complete(imputations)[[1]]
+
+
+### choose the imputed data with smallest mse for the linear mixed effect model
+check = lapply(1:4, function(s){
+  mod = lmer(Heat~ trtgrp + time +(1|animal), data =complete(imputations)[[s]] )
+  mse =mean((summary(mod)$residuals)^2)
+  return(mse)
+})
+
+## choose the first imputed dat set
+dat = complete(imputations)[[1]]
+
+
+n = length(unique(dat$animal))
+
+dat = dat %>% 
+  mutate(time2= time^2, time3 = time^3)
+
+##### hour-level data #### 
+dat.new = dat %>% 
+  mutate(time = ceiling(time %/% 60)+1) ## create hour data based on minutes (1-24) and name it as "time"
+dat.h = aggregate(Heat ~ time+animal+trtgrp, data = dat, mean) ## get average heat of each subject across hour
+dat.h = dat.h %>%
+  mutate(time2 = time^2, time3 = time^3) ## create qudratic and cubic hour variables
+
+
+```
+
+
+## by minitue 
+
+
+```{r echo=F, message=F, warning=F, cache=T,eval=F}
+#options("scipen"=100, "digits"=2)
+### analysis results 
+source("./codes/EE_analysis_K_AIC.R") ### load the functions used for basis number selection
+source("./codes/EE_analysis.R") ## load the function used for data analysis
+
+res.ana.min = EE_analysis(dat)
+### the results of the function EE_analysis() is a list of 12, where each elements represents a model 
+
+### get AIC values
+AIC.min = lapply(res.ana.min, function(s){
+  AIC(logLik(s))
+})
+
+### get fixed effect 
+beta.min = lapply(res.ana.min, function(s){
+  fixef(s)
+}) 
+```
+
+
+
+
+
+
+
+## by hour (mean Heat)
+
+
+```{r echo=F, message=F, warning=F, cache=T,eval=F}
+#options("scipen"=100, "digits"=2)
+### analysis results 
+source("./codes/EE_analysis_K_AIC.R") ### load the functions used for basis number selection
+source("./codes/EE_analysis.R") ## load the function used for data analysis
+
+res.ana.hour = EE_analysis(dat.h)
+
+AIC.hour = lapply(res.ana.hour, function(s){
+  AIC(logLik(s))
+})
+
+beta.hour = lapply(res.ana.hour, function(s){
+  fixef(s)
+}) 
+
+```
+
+
+# Bootstrap 
+
+## Boostrap 1 (by hour)
+
+1. re-sample by subject 
+2. If same subject was selected more than one time, the name of the subject will be changed based on the number of times it was selected
+
+SE of estimated $\beta$ is computed by 
+$$
+\widehat{\operatorname{SE}}(\hat{\boldsymbol{\beta}})=\sqrt{\frac{1}{B-1} \sum_{b=1}^{B}\left(\hat{\boldsymbol{\beta}}_{b}^{}-\bar{\hat{\boldsymbol{\beta}}}^{}\right)^{2}}
+$$
+
+The P-value is computed as $2 * \min \left[P\left(\hat{\boldsymbol{\beta}} < \boldsymbol{0} \mid H_{0}\right), P\left(\hat{\boldsymbol{\beta}} > \boldsymbol{0} \mid H_{0}\right)\right]$
+
+### codes used for bootstrap
+
+```{r echo=F, message=F, warning=F, eval = F}
+source("./codes/EE_analysis_K_AIC.R") ### load the functions used for basis number selection
+source("./codes/EE_analysis.R") ## load the function used for data analysis
+source("./codes/EE_analysis_boot.R") ## load the function used for bootstrap
+
+############ do bootstrap ######
+res = EE_analysis_boot(dat = dat.h, boot_iter = 500, computing = "parallel")
+## @boot_iter is number of iterations (replications) of bootstrap
+## @dat is the sample data in the long format (the same one used for data analysis)
+## for the purpose of simple application, we need to name the variable for subject id "animal" if it was not. 
+## @computing is to select whether parallel computing or not. Default is paralleling computing
+## The results of EE_analysis_boot() is a list with length of boot_iter, where each element represents each bootstrap
+
+#### save bootstrap results ###
+saveRDS(EE_bootstrap03_hour_results$res, "./bootstrap/bootstrap03_hour/EE_analysis_bootstrap.rds")
+### "EE_bootstrap03_hour" is the name of r file that I used to run bootstrap
+### if submitting a job in R rather than using Console, the corrsponding result will be named as "rFileName_results"
+### which is why the result I save was called "EE_bootstrap03_hour_results"
+
+```
+
+
+
+```{r  echo=F, message=F, warning=F, eval=F}
+#### read bootstrap results ##
+res = readRDS("./bootstrap/bootstrap03_hour/EE_analysis_bootstrap.rds") ##non parametric models
+
+```
+
+
+
+```{r echo=F, message=F, warning=F,eval=F}
+
+boot_iter = 500 ## number of iterations (replications) of bootstrap
+
+
+################# CI by bootstrap######################
+
+################# non-parametric models #########
+coef.list = list()
+
+for(i in 1:12){
+temp= lapply(res, function(s){
+ #  temp = coef(s[[i]])$animal ## get all the coefficients 
+ #  coef.fix = temp %>% select(contains("Intercept") | contains("trtgrp") | contains("time")) ## only keep the fixed coefficients
+ # return(coef.fix[1,]) ## only return the first row since they are the same for all the subejcts (rows)
+   temp= fixef(s[[i]])%>% t() %>% as.data.frame() 
+  coef.fix = temp %>% select(contains("Intercept") | contains("trtgrp") | contains("hour")) ## only keep the fixed coefficients
+ return(coef.fix) 
+}) 
+coef.name = names(temp[[1]])
+coef.list[[i]] = temp %>% 
+  unlist() %>% 
+  matrix(nrow= boot_iter, byrow=T) %>% ## sample size is 18
+  as.data.frame()
+
+colnames(coef.list[[i]]) = coef.name ## name the coefficient with corresponding covariate
+} ## end of for loop
+names(coef.list) = names(res[[1]]) ### take the name of the first iteration to name the model
+
+CI.boot = lapply(coef.list, function(s){
+  apply(s, 2, function(ss){quantile(ss, prob=c(0.025,0.975))})
+})
+
+
+
+pvalue.boot.nonpar.hour= lapply(coef.list, function(s){
+  apply(s, 2, function(ss){
+    p1 = try(mean(ss < 0))
+   p2 = try(mean(ss> 0))
+   2*min(p1,p2)
+  })
+})
+
+
+SE.boot.nonpar.hour= lapply(coef.list, function(s){
+  apply(s, 2, function(ss){
+  sd(ss)
+  })
+})
+
+
+
+
+#### significance test by the lmerTest ####
+
+pvalue.list = list()
+
+for(i in 1:12){
+temp= lapply(res, function(s){
+  temp = summary(s[[i]]) ## summary the model
+  coef.fix = temp$coefficients ## only keep the fixed coefficients
+  p.fix = coef.fix[,5] ## abstract the p-value 
+ return(p.fix) 
+}) 
+coef.name = names(temp[[1]])
+pvalue.list[[i]] = temp %>% 
+  unlist() %>% 
+  matrix(nrow= boot_iter, byrow=T) %>% ## sample size is 18
+  as.data.frame()
+
+colnames(pvalue.list[[i]]) = coef.name ## name the coefficient with corresponding covariate
+}
+names(pvalue.list) = names(res[[1]]) ### take the name of the first iteration to name the model
+
+
+### the upper and lower quantiles of bootstrap p-values 
+
+Pvalue.quantile= lapply(pvalue.list, function(s){
+  apply(s, 2, function(ss){round(quantile(ss, prob=c(0.025,0.975)),6)})
+})
+
+### get the percentage of p-value that is less than 0.05
+Sign.per = lapply(pvalue.list, function(s){
+  apply(s, 2, function(ss){mean(ss<0.05)})
+})
+
+
+```
+
+
+
+## Boostrap 2 (by minute)
+
+
+1. re-sample by subject 
+2. If same subject was selected more than one time, the name of the subject will be changed based on the number of times it was selected
+
+SE of estimated $\beta$ is computed by 
+$$
+\widehat{\operatorname{SE}}(\hat{\boldsymbol{\beta}})=\sqrt{\frac{1}{B-1} \sum_{b=1}^{B}\left(\hat{\boldsymbol{\beta}}_{b}^{}-\bar{\hat{\boldsymbol{\beta}}}^{}\right)^{2}}
+$$
+
+The P-value is computed as $2 * \min \left[P\left(\hat{\boldsymbol{\beta}} < \boldsymbol{0} \mid H_{0}\right), P\left(\hat{\boldsymbol{\beta}} > \boldsymbol{0} \mid H_{0}\right)\right]$
+
+### codes used for bootstrap
+
+```{r echo=F, message=F, warning=F, eval = F}
+source("./codes/EE_analysis_K_AIC.R") ### load the functions used for basis number selection
+source("./codes/EE_analysis.R") ## load the function used for data analysis
+source("./codes/EE_analysis_boot.R") ## load the function used for bootstrap
+
+############ do bootstrap ######
+res = EE_analysis_boot(dat = dat, boot_iter = 500, computing = "parallel")
+## @boot_iter is number of iterations (replications) of bootstrap
+## @dat is the sample data in the long format (the same one used for data analysis)
+## for the purpose of simple application, we need to name the variable for subject id "animal" if it was not. 
+## @computing is to select whether parallel computing or not. Default is paralleling computing
+## The results of EE_analysis_boot() is a list with length of boot_iter, where each element represents each bootstrap
+
+
+#### save bootstrap results ###
+saveRDS(EE_bootstrap02_mins_results$res, "./bootstrap/bootstrap02/EE_analysis_bootstrap_min_parametric.rds")
+### "EE_bootstrap02_mins" is the name of r file that I used to run bootstrap
+### if submitting a job in R rather than using Console, the corrsponding result will be named as "rFileName_results"
+### which is why the result I save was called "EE_bootstrap02_mins_results"
+
+```
+
+
+```{r  echo=F, message=F, warning=F, cache = T, eval = F}
+res = readRDS("./bootstrap/bootstrap02/EE_analysis_bootstrap_min.rds")
+```
+
+
+```{r echo=F, message=F, warning=F, eval = F}
+
+
+boot_iter = 500
+
+
+
+################# non-parametric models #########
+coef.list = list()
+
+for(i in 1:12){
+temp= lapply(res, function(s){
+ #  temp = coef(s[[i]])$animal ## get all the coefficients 
+ #  coef.fix = temp %>% select(contains("Intercept") | contains("trtgrp") | contains("time")) ## only keep the fixed coefficients
+ # return(coef.fix[1,]) ## only return the first row since they are the same for all the subejcts (rows)
+   temp= fixef(s[[i]])%>% t() %>% as.data.frame() 
+  coef.fix = temp %>% select(contains("Intercept") | contains("trtgrp") | contains("time")) ## only keep the fixed coefficients
+ return(coef.fix) 
+}) 
+coef.name = names(temp[[1]])
+coef.list[[i]] = temp %>% 
+  unlist() %>% 
+  matrix(nrow= boot_iter, byrow=T) %>% ## sample size is 18
+  as.data.frame()
+
+colnames(coef.list[[i]]) = coef.name ## name the coefficient with corresponding covariate
+} ## end of for loop
+names(coef.list) = names(res[[1]]) ### take the name of the first iteration to name the model
+
+################# CI by bootstrap######################
+
+CI.boot = lapply(coef.list, function(s){
+  apply(s, 2, function(ss){quantile(ss, prob=c(0.025,0.975))})
+})
+
+
+################## pvalue by bootstrap######################
+
+pvalue.boot.nonpar.min= lapply(coef.list, function(s){
+  apply(s, 2, function(ss){
+    p1 = try(mean(ss < 0))
+   p2 = try(mean(ss> 0))
+   2*min(p1,p2)
+  })
+})
+
+################## SE by bootstrap######################
+
+SE.boot.nonpar.min= lapply(coef.list, function(s){
+  apply(s, 2, function(ss){
+  sd(ss)
+  })
+})
+
+
+#### significance test by the lmerTest ####
+
+pvalue.list = list()
+
+for(i in 1:12){
+temp= lapply(res, function(s){
+  temp = summary(s[[i]]) ## summary the model
+  coef.fix = temp$coefficients ## only keep the fixed coefficients
+  p.fix = coef.fix[,5] ## abstract the p-value 
+ return(p.fix) 
+}) 
+coef.name = names(temp[[1]])
+pvalue.list[[i]] = temp %>% 
+  unlist() %>% 
+  matrix(nrow= boot_iter, byrow=T) %>% ## sample size is 18
+  as.data.frame()
+
+colnames(pvalue.list[[i]]) = coef.name ## name the coefficient with corresponding covariate
+}
+names(pvalue.list) = names(res[[1]]) ### take the name of the first iteration to name the model
+
+
+### the upper and lower quantiles of bootstrap p-values 
+
+Pvalue.quantile= lapply(pvalue.list, function(s){
+  apply(s, 2, function(ss){round(quantile(ss, prob=c(0.025,0.975)),6)})
+})
+
+### get the percentage of p-value that is less than 0.05
+Sign.per = lapply(pvalue.list, function(s){
+  apply(s, 2, function(ss){mean(ss<0.05)})
+})
+
+
+```
+
+# Tables
+
+Here the tables included in the manuscript
+1. The results of parametric models included in the tables (table 1-table 3) were obtained by data analysis 
+2. The results of non-parametric models included in the tables (table 4-table 5) were obtained by bootstrap 
+
+```{r echo=F, eval=F}
+
+#### tp ####
+tb.min = data.frame(beta =c(beta.min$mod.tp.lm), 
+                   SE = c(SE.boot.nonpar.min$mod.tp.lm),
+                          Pvalue = c(pvalue.boot.nonpar.min$mod.tp.lm) )
+tb.hour = data.frame(beta =c(beta.hour$mod.tp.lm), 
+                   SE = c(SE.boot.nonpar.hour$mod.tp.lm),
+                          Pvalue = c(pvalue.boot.nonpar.hour$mod.tp.lm) )
+
+tb.tp.lm = rbind(tb.min, tb.hour)%>% round(3)
+
+tb.min = data.frame(beta =c(beta.min$mod.tp.qm), 
+                   SE = c(SE.boot.nonpar.min$mod.tp.qm),
+                          Pvalue = c(pvalue.boot.nonpar.min$mod.tp.qm) )
+tb.hour = data.frame(beta =c(beta.hour$mod.tp.qm), 
+                   SE = c(SE.boot.nonpar.hour$mod.tp.qm),
+                          Pvalue = c(pvalue.boot.nonpar.hour$mod.tp.qm) )
+
+tb.tp.qm = rbind(tb.min, tb.hour)%>% round(3)
+
+
+tb.min = data.frame(beta =c(beta.min$mod.tp.cm), 
+                   SE = c(SE.boot.nonpar.min$mod.tp.cm),
+                          Pvalue = c(pvalue.boot.nonpar.min$mod.tp.cm) )
+tb.hour = data.frame(beta =c(beta.hour$mod.tp.cm), 
+                   SE = c(SE.boot.nonpar.hour$mod.tp.cm),
+                          Pvalue = c(pvalue.boot.nonpar.hour$mod.tp.cm) )
+
+tb.tp.cm = rbind(tb.min, tb.hour)%>% round(3)
+
+
+########## bs ###########
+
+tb.min = data.frame(beta =c(beta.min$mod.bs.lm), 
+                   SE = c(SE.boot.nonpar.min$mod.bs.lm),
+                          Pvalue = c(pvalue.boot.nonpar.min$mod.bs.lm) )
+tb.hour = data.frame(beta =c(beta.hour$mod.bs.lm), 
+                   SE = c(SE.boot.nonpar.hour$mod.bs.lm),
+                          Pvalue = c(pvalue.boot.nonpar.hour$mod.bs.lm) )
+
+tb.bs.lm = rbind(tb.min, tb.hour)%>% round(3)
+
+tb.min = data.frame(beta =c(beta.min$mod.bs.qm), 
+                   SE = c(SE.boot.nonpar.min$mod.bs.qm),
+                          Pvalue = c(pvalue.boot.nonpar.min$mod.bs.qm) )
+tb.hour = data.frame(beta =c(beta.hour$mod.bs.qm), 
+                   SE = c(SE.boot.nonpar.hour$mod.bs.qm),
+                          Pvalue = c(pvalue.boot.nonpar.hour$mod.bs.qm) )
+
+tb.bs.qm = rbind(tb.min, tb.hour)%>% round(3)
+
+
+tb.min = data.frame(beta =c(beta.min$mod.bs.cm), 
+                   SE = c(SE.boot.nonpar.min$mod.bs.cm),
+                          Pvalue = c(pvalue.boot.nonpar.min$mod.bs.cm) )
+tb.hour = data.frame(beta =c(beta.hour$mod.bs.cm), 
+                   SE = c(SE.boot.nonpar.hour$mod.bs.cm),
+                          Pvalue = c(pvalue.boot.nonpar.hour$mod.bs.cm) )
+
+tb.bs.cm = rbind(tb.min, tb.hour)%>% round(3)
+
+kable(tb.tp.lm, format= "latext") ## tp model with linear  
+kable(tb.tp.qm, format= "latext") ## tp model with cubic terms
+
+############## parametric ###########
+
+beta.par.hour=lapply(res.ana.hour, function(s) {
+  temp = summary(s)
+  coef = temp$coefficients %>% as.data.frame %>% round(3)
+  coef[,-c(3,4)]
+})
+
+lapply(beta.par.hour , function(s) kable(s, format="latex"))
+
+```
+
+
+
+# Example Analysis Procedures 
+
+We take the example of hour-level animal data to illustrate a typical data analysis procedure
+
+## data load and cleaning 
+
+
+1. we did imputation for missing Heat data in observation 11 and 12 at minute level
+2. we created hour variable based on min (I used a really smart way (I think) and I am kind of pround of it)
+3. we take average heat by hour to create hour-level data 
+4. for the purpose of simple application, we need to change the time variable in the data into "time" if it was not.
+5. For the purpose of simple application, we need to name the variable for subject id as "animal" if it was not. 
+
+
+
+```{r echo=T, message=F, warning=F, include=F,eval=F}
+
+dat = read.table("./rats_heat.txt", header=T)
+# dim(dat)
+# head(dat)
+# table(dat$time)
+
+
+### observation 11 and 12 do not have Heat data at 24 hours
+### We use imputation to "create" some for them at the minute level
+### The corresponding minute was copied observation 10 since each observations have sort of different time points
+dim(dat[dat$animal==10,]) ## 200 obs
+dim(dat[dat$animal==11,]) ## 190
+dim(dat[dat$animal==12,]) ## 190
+
+## add 10 rows to subject 11 with Heat = NA and time = time of obs 10
+obs11 = dat %>% 
+  filter(animal ==11) %>% 
+  add_row(animal= rep(11, 10), Heat = rep(NA, 10), 
+          trtgrp = rep(1, 10), time = dat[dat$animal==10,]$time[191:200])  
+
+## add 10 rows to subject 12 with Heat = NA and time = time of obs 10
+obs12 = dat %>% 
+  filter(animal ==12) %>% 
+  add_row(animal= rep(12, 10), Heat = rep(NA, 10), 
+          trtgrp = rep(1, 10), time = dat[dat$animal==10,]$time[191:200])  
+
+### replace the new data for obs 11 and 12 in the data 
+dat = dat %>% 
+  filter(animal !=11 & animal !=12) %>% 
+  add_row(obs11) %>% 
+  add_row(obs12)
+
+### Convert to a missing_data.frame
+mdf = missing_data.frame(dat)
+
+#image(mdf)
+# hist(mdf)
+# show(mdf)
+
+# conduct the multiple imputation 
+# note there are options to use here if you can access multiple cores since this may take a while
+imputations = mi(mdf, n.iter = 30, n.chains = 4, max.minutes = 20, seed = 123)
+
+## image(imputations)
+## plot(imputations)
+
+# we can access each imputed data set manually using 'complete'
+test1 = complete(imputations)[[1]]
+
+
+### choose the imputed data with smallest mse for the linear mixed effect model
+check = lapply(1:4, function(s){
+  mod = lmer(Heat~ trtgrp + time +(1|animal), data =complete(imputations)[[s]] )
+  mse =mean((summary(mod)$residuals)^2)
+  return(mse)
+})
+
+## choose the first imputed dat set
+dat = complete(imputations)[[1]]
+
+
+n = length(unique(dat$animal))
+##### hour-level data #### 
+dat.new = dat %>% 
+  mutate(time = ceiling(time %/% 60)+1) ## create hour data based on minutes (1-24) and name it as "time"
+dat.h = aggregate(Heat ~ time+animal+trtgrp, data = dat, mean) ## get average heat of each subject across hour
+dat.h = dat.h %>%
+  mutate(time2 = time^2, time3 = time^3) ## create quadratic and cubic hour variables
+
+
+```
+
+## data analysis 
+
+```{r echo=T, message=F, warning=F, cache=T,eval=F}
+#options("scipen"=100, "digits"=2)
+### analysis results 
+source("./codes/EE_analysis_K_AIC.R") ### load the functions used for basis number selection
+source("./codes/EE_analysis.R") ## load the function used for data analysis
+
+library(stats)
+library(ggplot2)
+library(lattice)
+library(dplyr)
+library(magrittr)
+library(Matrix)
+library(MASS)
+library(reshape)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(mi) ## for imputation
+library(lmerTest)
+library(cplm) ## truncated power splines
+
+### conduct data analysis on the hour-level data 
+res.ana.hour = EE_analysis(dat.h)
+
+### get AIC vlaues for each model 
+AIC.hour = lapply(res.ana.hour, function(s){
+  AIC(logLik(s))
+})
+
+### get estimated coefficients
+beta.hour = lapply(res.ana.hour, function(s){
+  fixef(s)
+}) 
+
+```
+
+## Bootstrap
+For the inference of non-parametric models
+
+1. re-sample by subject 
+2. If same subject was selected more than one time, the name of the subject will be changed based on the number of times it was selected
+
+### codes used for bootstrap
+
+The following R codes can be written in a separate r file and submit as a job in R
+
+1. For the purpose of simple application, we need to name the variable for subject id as "animal" if it was not. 
+2. For the purpose of simple application, we need to name the variable for time as "time" if it was not.
+
+```{r echo=T, message=F, warning=F, eval = F}
+source("./codes/EE_analysis_K_AIC.R") ### load the functions used for basis number selection
+source("./codes/EE_analysis.R") ## load the function used for data analysis
+source("./codes/EE_analysis_boot.R") ## load the function used for bootstrap
+
+############ do bootstrap ######
+res = EE_analysis_boot(dat = dat.h, boot_iter = 500, computing = "parallel")
+## @boot_iter is number of iterations (replications) of bootstrap
+## @dat is the sample data in the long format (the same one used for data analysis)
+## for the purpose of simple application, we need to name the variable for subject id "animal" if it was not. 
+## @computing is to select whether parallel computing or not. Default is paralleling computing
+## The results of EE_analysis_boot() is a list with length of boot_iter, where each element represents each bootstrap
+
+```
+
+
+```{r  echo=T, message=F, warning=F, eval=F}
+#### save bootstrap results ###
+saveRDS(EE_bootstrap03_hour_results$res, "./bootstrap/bootstrap03_hour/EE_analysis_bootstrap.rds")
+### "EE_bootstrap03_hour" is the name of r file that I used to run bootstrap
+### if submitting a job in R rather than using Console, the corrsponding result will be named as "rFileName_results"
+### which is why the result I save was called "EE_bootstrap03_hour_results"
+
+#### read bootstrap results ##
+res = readRDS("./bootstrap/bootstrap03_hour/EE_analysis_bootstrap.rds") ##non parametric models
+
+```
+
+### analysis bootstrap results 
+
+```{r echo=T, message=F, warning=F,eval=F}
+
+boot_iter = 500 ## number of iterations (replications) of bootstrap
+
+################# non-parametric models #########
+
+coef.list = list()
+
+for(i in 1:12){
+temp= lapply(res, function(s){
+ #  temp = coef(s[[i]])$animal ## get all the coefficients 
+ #  coef.fix = temp %>% select(contains("Intercept") | contains("trtgrp") | contains("time")) ## only keep the fixed coefficients
+ # return(coef.fix[1,]) ## only return the first row since they are the same for all the subejcts (rows)
+   temp= fixef(s[[i]])%>% t() %>% as.data.frame() 
+  coef.fix = temp %>% select(contains("Intercept") | contains("trtgrp") | contains("hour")) ## only keep the fixed coefficients
+ return(coef.fix) 
+}) 
+coef.name = names(temp[[1]])
+coef.list[[i]] = temp %>% 
+  unlist() %>% 
+  matrix(nrow= boot_iter, byrow=T) %>% ## sample size is 18
+  as.data.frame()
+
+colnames(coef.list[[i]]) = coef.name ## name the coefficient with corresponding covariate
+} ## end of for loop
+
+names(coef.list) = names(res[[1]]) ### take the name of the first iteration to name the model
+
+################# CI by bootstrap######################
+CI.boot = lapply(coef.list, function(s){
+  apply(s, 2, function(ss){quantile(ss, prob=c(0.025,0.975))})
+})
+
+
+################# pvalues by bootstrap######################
+pvalue.boot.nonpar.hour= lapply(coef.list, function(s){
+  apply(s, 2, function(ss){
+    p1 = try(mean(ss < 0))
+   p2 = try(mean(ss> 0))
+   2*min(p1,p2)
+  })
+})
+
+################# SE by bootstrap######################
+SE.boot.nonpar.hour= lapply(coef.list, function(s){
+  apply(s, 2, function(ss){
+  sd(ss)
+  })
+})
+
+```
+
+
+
+
