@@ -1,4 +1,4 @@
-# EE-Analysis
+# EnergyExpenditure_Analysis
 
 In the folder named codes, it contains codes for the functions that can be used.
 
